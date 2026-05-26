@@ -6,6 +6,8 @@ __pycache__/
 # Outputs 
 outputs/
 lsf_outputs/
+results/
+slurm/
 
 # C extensions
 *.so

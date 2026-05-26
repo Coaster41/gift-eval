@@ -1,0 +1,66 @@
+Coen's summary:
+Moiraic is smoother and has more (too) confident quantiles, it also often regresses to the average value missing the shape or noisiness of the data.
+Moiraie is noisier and follows irregular time series shapes better, but this leads to hallucinated features at incorrect times. It is also has wider quantiles and often distinct patch artifacts.
+
+moiraic_base_11
+moiraie_base_7
+[relative performance 1.0 is better MASE: moiraic, moiraie] {WQL relative performance}
+"trend" means long term shapes (flat, generally upward, flat with minor sinks, noisy long term, etc...)
+"pattern" means clear periodic shapes if there are consistent peaks how accurate do they match those smaller shapes
+"shape" means general look regardless of intensity or whether it matches in time (noisiness, number of valleys/peaks, etc.) like dynamic time warping
+
+Findings:
+bizitobs_application/10S/medium [1.29, 1.00] {1.09, 1.00}
+c: delayed, tight, often flat
+e: jittery, quantiles share same shape, imperfect, minor artifacting (better)
+bizitobs_l2c/H/short [1.00, 1.31] {1.00, 1.28}
+c: tight, smooth but often wrong (general shape is ok) (better but not by much)
+e: hard artifacts, quantiles share same shape, wider quantiles, quite flat with linear trends/steps
+bizitobs_l2c/H/medium [1.00, 1.12] {1.00, 1.10}
+c: smooth and correct shape, doesn't match spikes or intensity, not tight (slightly better w/ worse quantiles)
+e: wider quantiles, consistently below true value, sharper peaks, spiky 
+bizitobs_l2c/H/long [1.00, 1.19] {1.00, 1.14}
+c: smoother, tighter, finds clear periodicity, predicts <0 values despite it being count data (slightly better w/ worse quantiles)
+e: spikier with large quantiles that follow shape of median forecast, finds periodicity 
+bizitobs_service/10S/short [1.22, 1.00] {1.26, 1.00}
+c: hallucinates forecasts, wider forecasts that have same shape as median, often far from true value
+e: distinct artifacting, each patch is distinct with large quantiles that match forecast, better matches shape of true minus artifacts (better)
+bizitobs_service/10S/medium [1.08, 1.00] {1.04, 1.00}
+c: smooth relatively flat forecasts that don't match data at all doesn't predict dips or any trends, tight and wide quantiles
+e: measures shape jitteriness of data well,  attempts to predict valley/peaks but misses, visible patch artifacting, (better)
+bizitobs_service/10S/long [1.00, 1.24] {1.00, 1.02}
+c: flat predictions or is slightly delayed periodicity, doesn't match shape very well
+e: tries to match shape but results in hallucinations or is off period, still more jittery with massive quantiles (better visually)
+ett2/H/long [1.00, 1.18] {1.00, 1.00}
+c: guesses a trend and then predicts a very consistent period/pattern, data is not nearly as clean and doesn't quite match the trend or pattern, regresses to a flatter prediction in a single example
+e: trend is a lot more irregular that generally matches better with real data, consistent periods/frequency with larger quantiles and shaper peaks/valleys, regresses to an irregular jittery pattern in same example as c (better)
+ett2/W/short [1.10, 1.00] {1.04, 1.00}
+c: smooth trend with large quantiles, gets trend correct (similar)
+e: smooth trend with large quantiles, gets trend correct (similar)
+loop_seattle/5T/long [1.21, 1.00] {1.26, 1.00}
+c: predicts a mostly flat forecast with hallucinated sinks, doesn't match spikiness of data
+e: smooth with an irregular trend that matches true data, sinks match data better with few hallucinated sinks, similarly sized quantiles as c (much better)
+loop_seattle/5T/medium [1.21, 1.00] {1.27, 1.00}
+c: trends are still very flat with no hallucinated sinks, predicts getting out of sinks well
+e: predicts sinks very well w/ some hallucinated sinks, irregular trend is good (much better)
+m4_hourly/H/short [1.00, 1.40] {1.00, 1.09}
+c: matches true data exactly super tight quantiles, super clear periodicity (slightly better)
+e: matches true data exactly super tight quantiles, larger quantiles at peak/valley slightly worse there, but very similar to c
+solar/10T/short [1.00 1.00] {1.04, 1.00}
+c: predicts hills but the shapes don't match, gets the periodicity correct, flat at 0 and then a hill
+e: predicts hills at correct time but misses shape, failed to predict irregularly shaped hill, clear artifacting, massive quantiles (barely better if at all)
+solar/10T/medium [1.00, 1.67] {1.00, 1.70}
+c: predicts smooth hills very clean forecasts but misses the irregularly shaped data (much better)
+e: fails to predict many of the hills and instead predicts small short spikes, hallucinates spikes on flat sections, massive quantiles, bad
+solar/10T/long [1.00, 1.74] {1.00, 1.70}
+c: same as solar/10T/medium (much better)
+e: same as solar/10T/medium
+us_births/D/short [1.00, 1.40] {1.00, 1.38}
+c: clear pattern with slightly off peaks, very clear periodicity, peak shape matches well (better)
+e: clear periodicity, valley intensity is off slightly, shape of peaks is unimodal instead of bimodal, slightly large quantiles
+us_births/M/short [1.00, 1.37] {1.00, 1.28}
+c: clear patter with the periodicity, shape is very pronounced (slightly better)
+e: clear patter with the periodicity, shape is very pronounced just slightly worse than c
+us_births/W/short [1.00, 1.06], {1.00, 1.10}
+c: predicts smooth short trend that usually matches direction but are a bit shifted (better)
+e: predicts less smooth short trend that matches in direction but is a shifted more, larger quantiles
