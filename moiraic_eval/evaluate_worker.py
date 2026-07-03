@@ -25,10 +25,13 @@ from gluonts.ev.metrics import (
     MeanWeightedSumQuantileLoss,
 )
 
+from gluonts.dataset.split import split as gluonts_split
 from gift_eval.data import Dataset
 from uni2ts.model.moiraic import MoiraicForecast, MoiraicModule
 from uni2ts.model.moiraie import MoiraieForecast, MoiraieModule
 from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
+from uni2ts.model.moiraix import MoiraiXForecast, MoiraiXModule
+from timesfm.pretrain import TimesFMXForecast, TimesFMXModule
 
 load_dotenv()
 logging.getLogger("gluonts.model.forecast").setLevel(logging.ERROR)
@@ -50,18 +53,22 @@ parser.add_argument("--model-path", type=str, required=True)
 parser.add_argument("--output-dir", type=str, required=True)
 parser.add_argument("--context-length", type=int, default=4000)
 parser.add_argument("--batch-size", type=int, default=128)
+parser.add_argument("--max-prediction-length", type=int, default=None,
+                    help="Cap prediction length to this value and evaluate only "
+                         "the shortest-term version of each dataset.")
 args = parser.parse_args()
 
 RANK       = args.rank        if args.rank        is not None else int(os.environ.get("SLURM_PROCID", 0))
 WORLD_SIZE = args.world_size  if args.world_size  is not None else int(os.environ.get("SLURM_NTASKS", 1))
 LOCAL_RANK = args.local_rank  if args.local_rank  is not None else int(os.environ.get("SLURM_LOCALID", RANK))
 
-MODEL_NAME       = args.model_name
-CHECKPOINT_TYPE  = args.checkpoint_type
-MODEL_PATH       = args.model_path
-OUTPUT_DIR       = args.output_dir
-CONTEXT_LENGTH   = args.context_length
-BATCH_SIZE       = args.batch_size
+MODEL_NAME            = args.model_name
+CHECKPOINT_TYPE       = args.checkpoint_type
+MODEL_PATH            = args.model_path
+OUTPUT_DIR            = args.output_dir
+CONTEXT_LENGTH        = args.context_length
+BATCH_SIZE            = args.batch_size
+MAX_PREDICTION_LENGTH = args.max_prediction_length
 QUANTILE_LEVELS  = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
 # Pin to a single visible GPU. Using cuda:0 inside the process is cleanest
@@ -99,6 +106,21 @@ for ds_name in all_datasets:
             continue
         work_items.append((ds_name, term))
 
+# When a prediction length cap is set, keep one term per dataset.
+# If MAX_PREDICTION_LENGTH > 48, prefer medium (if it exists) else short.
+# Otherwise keep short (first in short→medium→long order).
+if MAX_PREDICTION_LENGTH is not None:
+    prefer_medium = MAX_PREDICTION_LENGTH > 48
+    ds_order = []
+    ds_to_term: dict = {}
+    for ds_name, term in work_items:
+        if ds_name not in ds_to_term:
+            ds_order.append(ds_name)
+            ds_to_term[ds_name] = term
+        elif prefer_medium and term == "medium" and ds_to_term[ds_name] == "short":
+            ds_to_term[ds_name] = term
+    work_items = [(ds_name, ds_to_term[ds_name]) for ds_name in ds_order]
+
 # Round-robin shard. The sorted() above + RANK stride gives reasonable
 # load balancing assuming dataset cost has no strong correlation to alpha order.
 my_items = [w for i, w in enumerate(work_items) if i % WORLD_SIZE == RANK]
@@ -114,13 +136,34 @@ def load_module(model_path: str, checkpoint_type: str, ModuleCls):
         return ModuleCls.load_from_checkpoint(model_path)
     raise ValueError(checkpoint_type)
 
-model_type = ("moiraic" if "moiraic" in MODEL_NAME
+model_type = ("timesfmx" if "timesfmx" in MODEL_NAME
+              else "moiraix" if "moiraix" in MODEL_NAME
+              else "moiraic" if "moiraic" in MODEL_NAME
               else "moiraie" if "moiraie" in MODEL_NAME
               else "moirai")
-ModuleCls   = {"moiraic": MoiraicModule,   "moiraie": MoiraieModule,   "moirai": Moirai2Module}[model_type]
-ForecastCls = {"moiraic": MoiraicForecast, "moiraie": MoiraieForecast, "moirai": Moirai2Forecast}[model_type]
+ModuleCls   = {"timesfmx": TimesFMXModule,   "moiraix": MoiraiXModule,   "moiraic": MoiraicModule,   "moiraie": MoiraieModule,   "moirai": Moirai2Module}[model_type]
+ForecastCls = {"timesfmx": TimesFMXForecast, "moiraix": MoiraiXForecast, "moiraic": MoiraicForecast, "moiraie": MoiraieForecast, "moirai": Moirai2Forecast}[model_type]
 module = load_module(MODEL_PATH, CHECKPOINT_TYPE, ModuleCls)
 print(f"[rank {RANK}] loaded module from {MODEL_PATH}")
+
+# Decode auto-detection: next-token (predict_next) modules need an explicit AR
+# decode. MoiraiXForecast defaults to ar_method=None (single-pass), which leaves
+# long horizons decoded from runs of mask tokens; "branch" is the decode the
+# moiraic family (same objective) has always used via MoiraicForecast's default.
+# Other model types keep their own class defaults.
+FORECAST_EXTRA_KWARGS = {}
+if model_type == "moiraix" and getattr(module, "predict_next", False):
+    FORECAST_EXTRA_KWARGS["ar_method"] = "branch"
+elif model_type == "timesfmx":
+    # TimesFMX is univariate; GIFT-Eval multivariate datasets are already
+    # split channel-independently at the dataset level (to_univariate below),
+    # so target_dim=1 is correct here. AR decode + single-pass horizon are
+    # eval-time knobs (env-overridable for the PR6 inference sweep).
+    FORECAST_EXTRA_KWARGS["ar_method"] = os.environ.get("TFMX_AR_METHOD", "naive")
+    if (sph := os.environ.get("TFMX_SPH")):
+        FORECAST_EXTRA_KWARGS["single_pass_horizon"] = int(sph)
+print(f"[rank {RANK}] forecast kwargs auto-detected: {FORECAST_EXTRA_KWARGS} "
+      f"(predict_next={getattr(module, 'predict_next', None)})")
 
 # ============================================================
 # Predictor (unchanged from original)
@@ -142,7 +185,7 @@ class MoiraiQuantilePredictor:
             target_dim=target_dim,
             feat_dynamic_real_dim=feat_dynamic_real_dim,
             past_feat_dynamic_real_dim=past_feat_dynamic_real_dim,
-            ar_method="trajectory"
+            **FORECAST_EXTRA_KWARGS,
         ).to(self.device)
 
     def predict(self, test_data_input):
@@ -219,9 +262,28 @@ for ds_name, term in my_items:
         to_univariate = Dataset(name=ds_name, term=term, to_univariate=False).target_dim != 1
         dataset = Dataset(name=ds_name, term=term, to_univariate=to_univariate)
 
+        prediction_length = dataset.prediction_length
+        if MAX_PREDICTION_LENGTH is not None:
+            prediction_length = min(prediction_length, MAX_PREDICTION_LENGTH)
+
+        # When prediction_length is capped, regenerate test instances with the
+        # shorter horizon so that label shapes match the forecast shapes.
+        if prediction_length < dataset.prediction_length:
+            _, test_template = gluonts_split(
+                dataset.gluonts_dataset,
+                offset=-dataset.prediction_length * dataset.windows,
+            )
+            test_data = test_template.generate_instances(
+                prediction_length=prediction_length,
+                windows=dataset.windows,
+                distance=dataset.prediction_length,
+            )
+        else:
+            test_data = dataset.test_data
+
         predictor = MoiraiQuantilePredictor(
             module=module,
-            prediction_length=dataset.prediction_length,
+            prediction_length=prediction_length,
             context_length=CONTEXT_LENGTH,
             target_dim=1,
             past_feat_dynamic_real_dim=dataset.past_feat_dynamic_real_dim,
@@ -233,7 +295,7 @@ for ds_name, term in my_items:
         season_length = get_seasonality(dataset.freq)
         res = evaluate_model(
             predictor,
-            test_data=dataset.test_data,
+            test_data=test_data,
             metrics=metrics,
             batch_size=BATCH_SIZE,
             axis=None,
